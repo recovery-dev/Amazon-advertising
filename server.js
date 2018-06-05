@@ -1,5 +1,3 @@
-const express = require('express')
-const app = express();
 const request = require('request');
 const moment = require('moment');
 const fs = require('fs')
@@ -15,11 +13,12 @@ const auth = require('./helpers/auth');
 const cron = require('./helpers/cron');
 const db = require('./helpers/database');
 
-const downloadReport =  async function(reportId, type, headers, profile) {
+const downloadReport = async function(reportId, type, headers, profile) {
     const report = await getReport(reportId, type, headers);
     console.log(report)
     const file = JSON.parse(report);
     if (file.code) {
+        console.log(reportId)
         return false;
     }
     request({
@@ -40,7 +39,6 @@ const downloadReport =  async function(reportId, type, headers, profile) {
         const r = request(fileURL);
         const file_name = url.parse(fileURL).pathname.split('/').pop();
         r.on('response', function (res) {
-            // res.pipe(fs.createWriteStream('./download/' + file_name));
             const gunzip = zlib.createGunzip();
             const buffer = [];
             res.pipe(gunzip);
@@ -77,30 +75,27 @@ async function getReports(tokens, reportId, type) {
             'Authorization': config.token_type + ' ' + tokens.access_token,
             'Amazon-Advertising-API-Scope': '',
         };
-        // const type = 'keyword';
-        // const type = 'productAds';
         const data = await getProfiles(headers)
         const profiles = JSON.parse(data);
-        profiles.forEach((profile, key) => {
+        profiles.forEach(async (profile, key) => {
             headers['Amazon-Advertising-API-Scope'] = profile.profileId;
-            // const reportId = 'amzn1.clicksAPI.v1.p7.5B0FB34D.40737bac-c3e7-469b-b036-07e940947f59';
-            downloadReport(reportId, type, headers, profile);
+            await downloadReport(reportId, type, headers, profile);
         })
     }
 }
 
-const createReports = (startDate, endDate=moment().format('YYYYMMDD')) => {
+const createReports = async (startDate, endDate=moment().format('YYYYMMDD')) => {
     let date = moment(startDate).format('YYYYMMDD');
     let index = 0;
+    const tokens = await auth();
     do {
-        report(date);
+        report(tokens, date);
         index++;
         date = moment(startDate).add(index, 'days').format('YYYYMMDD');
     } while(date.indexOf(moment(endDate).add(1, 'days').format('YYYYMMDD')) == -1)
 }
 
-async function report(reportDate = moment().format('YYYYMMDD')) {
-    const tokens = await auth();
+async function report(tokens, reportDate = moment().format('YYYYMMDD')) {
     if (tokens && typeof tokens === 'object') {
         const headers = {
             'Content-Type': 'application/json',
@@ -118,28 +113,34 @@ async function report(reportDate = moment().format('YYYYMMDD')) {
             metrics: config.metricsForKeywords
         };
 
-        profiles.forEach(async profile => {
+        const reportType = config.reportTypeForKeywords;
+        let reports = [];
+        profiles.forEach(async (profile, index) => {
             headers['Amazon-Advertising-API-Scope'] = profile.profileId;
-            const reportId = 'amzn1.clicksAPI.v1.p7.5B0C022F.eda21426-5fbf-4f33-9921-87ff4a0d262a';
-            const res = await createReport(reportParam, config.reportTypeForKeywords, headers);
-            if (res) {
+            let res = await createReport(reportParam, reportType, headers);
+            if (res.reportId) {
                 if (typeof res === 'object') {
-                    console.log(res);
-                    let query = "INSERT INTO clabDevelopment.Reports (report_id, record_type, status, status_details, created_at) VALUES (";
-                    query += "'" + res.reportId + "','" + res.recordType + "','" + res.status + "','" + res.statusDetails + "','" + reportDate + "')";
-                    db.query(query, (err, result) => {
-                        if (err) throw err;
-                        return {
-                            status: 200,
-                            data: result
-                        };
-                    })
+                    const report = [res.reportId, res.recordType, res.status, res.statusDetails, reportDate];
+                    reports.push(report);
                 }
             } else {
-                console.log('Error')
-                return {
-                    status: 400,
-                    data: 'failed to create reports'
+                res = await createReport(reportParam, reportType, headers);
+                if (res.reportId) {
+                    const report = [res.reportId, res.recordType, res.status, res.statusDetails, reportDate];
+                    reports.push(report);
+                }
+            }
+            if (index === profiles.length - 1) {
+                let query = "INSERT INTO clabDevelopment.Reports (report_id, record_type, status, status_details, created_at) VALUES ?";
+                if (reports.length > 0) {
+                    db.query(query, [reports], (err, result) => {
+                        if (err) throw err;
+                        const notification = "Number of rows of campaign inserted:" + result.affectedRows;
+                        return {
+                            status: 200,
+                            data: notification
+                        };
+                    })
                 }
             }
         })
@@ -203,15 +204,16 @@ async function getReportIds() {
     const query = "SELECT * FROM clabDevelopment.Reports";
     const tokens = await auth();
     db.query(query, (err, result) => {
-        result.forEach(async row => {
+        result.forEach(row => {
             if (row && row.report_id) {
-                await getReports(tokens, row.report_id, row.record_type);
+                getReports(tokens, row.report_id, row.record_type);
             }
         });
     })
+    const reportId = "amzn1.clicksAPI.v1.p7.5B1651D5.3ff3d3d3-5750-40c4-bc4f-cfdd067a99e2"
+    getReports(tokens, reportId, 'productAds')
 }
 
-getReportIds();
+// getReportIds();
 
-
-// createReports(new Date('04/5/2018'));
+// createReports(new Date('04/7/2018'));
